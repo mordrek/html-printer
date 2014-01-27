@@ -6,6 +6,8 @@ using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
 using System.IO;
+using System.Xml.XPath;
+using System.Xml;
 
 namespace html_printer
 {
@@ -15,20 +17,18 @@ namespace html_printer
         public Size Size { get { return _size; } set { _size = value; OnResize(); } }
 
         public bool Scrollbars { get { return _browser.ScrollBarsEnabled; } set { _browser.ScrollBarsEnabled = value; } }
-             
-        
-        protected Dictionary<string, string> _parameters = new Dictionary<string,string>();
+
+        protected XPathDocument _xmlsource = null;
+        protected XPathNavigator _xmlnavigator = null;
+        protected List<Parameter> _parameters = new List<Parameter>();
         /// <summary>
         /// Parameters used to change the content of the HTML
-        /// A parameter can be written in two ways:
-        /// 1) key=val
-        /// Any text in the HTML that is equal to {{key}} will be replaced by value
-        /// 2) id.attr = val
-        /// The html is searched for tags with the given id. The attribute attr of the tag will be set to the value val
         /// </summary>
-        public Dictionary<string, string> Parameters { get { return _parameters; } set { _parameters = value; } }
+        public List<Parameter> Parameters { get { return _parameters; } set { _parameters = value; } }
 
         System.Windows.Forms.WebBrowser _browser;
+        protected XmlDocument _docXml = null;
+        protected XPathNavigator _docNavigator = null;
         protected AutoResetEvent _docLoadedEvent = new AutoResetEvent(false);
 
         public HTMLPrinter()
@@ -66,14 +66,14 @@ namespace html_printer
 
         public Bitmap Print()
         {
-            ApplyParameters();
+            ApplyParameters(Parameters);
             Bitmap image = new Bitmap(_browser.Bounds.Width, _browser.Bounds.Height);
             _browser.DrawToBitmap(image,_browser.Bounds);
             return image;
         }
         public void PrintToFile(string file)
         {
-            ApplyParameters();
+            ApplyParameters(Parameters);
             Bitmap bmp = Print();
             bmp.Save(file);
         }
@@ -84,37 +84,68 @@ namespace html_printer
             
         }
 
-        protected void ApplyParameters()
+        protected void ApplyParameters(List<Parameter> parameters)
         {
+            foreach (Parameter param in parameters)
+            {
+                switch (param.Type)
+                {
+                    case ParameterType.file:
+                        string[] content = File.ReadAllLines(param.Value);
+                        List<Parameter> fileParameters = new List<Parameter>();
+                        foreach (string line in content)
+                        {
+                            if (line != null && line.Contains("="))
+                            {
+                                fileParameters.Add(Parameter.Parse(line));
+                            }
+                        }
+                        ApplyParameters(fileParameters);
+                        break;
+                    case ParameterType.key:
+                        string curText = _browser.DocumentText.Replace("{{" + param.Key + "}}", GetParamValue(param.Value));
+                        _browser.DocumentText=curText;
+                        WaitForBrowse();
+                        break;
+                    case ParameterType.xpath:
+                        if (_docNavigator != null)
+                        {
+                            string val = GetParamValue(param.Value);
+                            foreach (XPathNavigator node in _docNavigator.Select(param.Key))
+                            {
+                                node.SetValue(val);
+                            }
+                            using (var stringWriter = new StringWriter())
+                            using (var xmlTextWriter = XmlWriter.Create(stringWriter))
+                            {
+                                _docXml.WriteTo(xmlTextWriter);
+                                xmlTextWriter.Flush();
+                                _browser.DocumentText = stringWriter.GetStringBuilder().ToString();
+                                WaitForBrowse();
+                            }
+                            
+                        }
+                        break;
+                    case ParameterType.xml:
+                        _xmlsource = new XPathDocument(param.Value);
+                        _xmlnavigator = _xmlsource.CreateNavigator();
+                        break;
+                }
+            }
             
             
-            foreach (KeyValuePair<string, string> kvp in Parameters)
-            {
-                if (kvp.Key.Contains('.')==false)
-                     ApplyParameter(kvp.Key, kvp.Value);
-
-            }
-
-            WaitForBrowse();
-
-            foreach (KeyValuePair<string, string> kvp in Parameters)
-            {
-                if (kvp.Key.Contains('.'))
-                    ApplyIdAttribute(kvp.Key.Substring(0, kvp.Key.IndexOf('.')), kvp.Key.Substring(kvp.Key.IndexOf('.') + 1), kvp.Value);
-
-            }
         }
 
-        protected void ApplyParameter(string key, string value)
+        protected string GetParamValue(string value)
         {
-            string curText = _browser.DocumentText.Replace("{{" + key + "}}", value);
-            _browser.DocumentText=curText;
-        }
-        protected void ApplyIdAttribute(string id, string attr, string value)
-        {
-            HtmlElement element = _browser.Document.GetElementById(id);
-            element.SetAttribute(attr, value);
-           
+            if(_xmlnavigator == null)
+                return value;
+
+            XPathNavigator nav= _xmlnavigator.SelectSingleNode(value);
+            if(nav!=null)
+            return nav.Value;
+
+            return value;
         }
 
         protected void WaitForBrowse()
@@ -127,6 +158,14 @@ namespace html_printer
 
         protected virtual void _browser_DocumentCompleted(object sender, System.Windows.Forms.WebBrowserDocumentCompletedEventArgs e)
         {
+            try
+            {
+                _docXml = new XmlDocument();
+                _docXml.LoadXml(_browser.DocumentText);
+                _docNavigator = _docXml.CreateNavigator();
+            }
+            catch
+            { }
             _docLoadedEvent.Set();
         }
     }
